@@ -56,7 +56,7 @@ npm run deploy
 在飞书多维表格边栏插件配置中使用以下 GitHub Pages 地址：
 
 ```
-https://[your-username].github.io/attachment-rename-plugin/
+https://chenchen1010.github.io/attachment-rename-plugin/
 ```
 
 ## 📄 许可证
