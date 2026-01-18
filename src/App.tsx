@@ -20,6 +20,7 @@ import {
   Toast,
   Typography,
 } from '@douyinfe/semi-ui';
+import { IconEyeClosed, IconEyeOpened } from '@douyinfe/semi-icons';
 import { DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const PREVIEW_LIMIT = 50;
@@ -283,6 +284,7 @@ export default function App() {
   const [estimatedCount, setEstimatedCount] = useState<number | null>(null);
   const [previewItems, setPreviewItems] = useState<PreviewItem[]>([]);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewCollapsed, setPreviewCollapsed] = useState(true);
 
   const [selectedRecordId, setSelectedRecordId] = useState('');
   const [selectedRecordCount, setSelectedRecordCount] = useState(0);
@@ -491,8 +493,7 @@ export default function App() {
     try {
       const selectedIds = await getRecordIdsByScope('selected');
       setSelectedRecordCount(selectedIds.length);
-      const recordId = selectedIds[0] || '';
-      if (!recordId) {
+      if (selectedIds.length !== 1) {
         setSelectedRecordId('');
         setSelectedAttachments([]);
         setSelectedAttachmentUrls([]);
@@ -500,6 +501,7 @@ export default function App() {
         setSelectedPreviewIndex(0);
         return;
       }
+      const recordId = selectedIds[0] || '';
       const record = await table.getRecordById(recordId);
       const attachments = (record.fields?.[attachmentFieldId] as IOpenAttachment[] | null | undefined) || [];
       setSelectedRecordId(recordId);
@@ -524,8 +526,19 @@ export default function App() {
         if (fullUrls.length === 0) {
           fullUrls = thumbUrls;
         }
-        setSelectedThumbnailUrls(normalizeUrlList(thumbUrls, tokens.length));
-        setSelectedAttachmentUrls(normalizeUrlList(fullUrls, tokens.length));
+        const normalizedFull = normalizeUrlList(fullUrls, tokens.length);
+        const normalizedThumbs = normalizeUrlList(thumbUrls, tokens.length);
+        const fallbackThumbs = normalizedThumbs.map((url, index) => {
+          if (url) {
+            return url;
+          }
+          if (isImageAttachment(attachments[index]) && normalizedFull[index]) {
+            return normalizedFull[index];
+          }
+          return '';
+        });
+        setSelectedThumbnailUrls(fallbackThumbs);
+        setSelectedAttachmentUrls(normalizedFull);
       }
       setSelectedPreviewIndex((prev) => {
         if (attachments.length === 0) {
@@ -863,76 +876,119 @@ export default function App() {
       </header>
 
       <section className="card preview-top">
-        <div className="section-title">选中单行可就进行附件预览</div>
-        <div className="preview-top-body">
-          <div className="preview-main">
-            {selectedLoading && <div className="empty">加载中…</div>}
-            {!selectedLoading && !attachmentFieldId && <div className="empty">请先选择附件字段</div>}
-            {!selectedLoading && attachmentFieldId && !selectedRecordId && (
-              <div className="empty">请在表格中选中一行</div>
-            )}
-            {!selectedLoading && attachmentFieldId && selectedRecordId && selectedAttachments.length === 0 && (
-              <div className="empty">该行没有附件</div>
-            )}
+        <div className="card-header">
+          <div className="section-title">选中单行即可进行附件预览</div>
+          <button
+            type="button"
+            className="collapse-toggle"
+            onClick={() => setPreviewCollapsed((prev) => !prev)}
+            aria-label={previewCollapsed ? '展开预览' : '收起预览'}
+          >
+            {previewCollapsed ? <IconEyeClosed /> : <IconEyeOpened />}
+            <span>{previewCollapsed ? '展开预览' : '收起预览'}</span>
+          </button>
+        </div>
+        {previewCollapsed ? (
+          <div className="collapse-hint">
+            {selectedLoading && '加载中…'}
+            {!selectedLoading && !attachmentFieldId && '请先选择附件字段'}
+            {!selectedLoading && attachmentFieldId && selectedRecordCount === 0 && '请在表格中选中一行'}
             {!selectedLoading &&
               attachmentFieldId &&
-              selectedRecordId &&
-              selectedAttachments.length > 0 &&
-              (() => {
-                if (!activeAttachment) {
-                  return <div className="preview-placeholder">暂无预览</div>;
-                }
-                if (isVideoAttachment(activeAttachment) && activeAttachmentUrl) {
-                  return (
-                    <video className="preview-video" src={activeAttachmentUrl} controls>
-                      当前浏览器不支持视频预览
-                    </video>
-                  );
-                }
-                if (isImageAttachment(activeAttachment) && (activeAttachmentUrl || activeThumbnailUrl)) {
-                  const src = activeAttachmentUrl || activeThumbnailUrl;
-                  return <img className="preview-image" src={src} alt={activeAttachment.name} />;
-                }
-                return <div className="preview-placeholder">{getFileTag(activeAttachment.name)}</div>;
-              })()}
+              selectedRecordCount > 1 &&
+              `已选 ${selectedRecordCount} 行，请只选一行进行预览`}
+            {!selectedLoading &&
+              attachmentFieldId &&
+              selectedRecordCount === 1 &&
+              '已选 1 行，点击眼睛展开预览'}
           </div>
-          <div className="preview-meta">
-            <div className="meta-title">当前文件</div>
-            <div className="file-name">{activeAttachment?.name || '—'}</div>
-            <div className="meta-row">已选记录：{selectedRecordCount}</div>
-            <div className="meta-row">附件数量：{selectedAttachments.length}</div>
-            <div className="meta-row">{reorderSaving ? '正在保存排序…' : '拖拽缩略图可调整顺序'}</div>
-          </div>
-        </div>
-        <div className="thumb-list">
-          {selectedAttachments.map((att, index) => {
-            const thumbUrl = selectedThumbnailUrls[index] || '';
-            const isActive = index === selectedPreviewIndex;
-            const isDragging = index === dragIndex;
-            const isDragOver = index === dragOverIndex;
-            return (
-              <div
-                className={`thumb-item${isActive ? ' active' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
-                key={`${att.token || att.name}-${index}`}
-                draggable={!reorderSaving}
-                onDragStart={() => handleDragStart(index)}
-                onDragOver={(event) => handleDragOver(event, index)}
-                onDrop={() => handleDrop(index)}
-                onDragEnd={handleDragEnd}
-                onClick={() => setSelectedPreviewIndex(index)}
-                title={att.name}
-              >
-                {thumbUrl ? (
-                  <img className="thumb-image" src={thumbUrl} alt={att.name} />
-                ) : (
-                  <div className="thumb-placeholder">{getFileTag(att.name)}</div>
+        ) : (
+          <div className="collapse-body">
+            <div className="preview-top-body">
+              <div className="preview-main">
+                {selectedLoading && <div className="empty">加载中…</div>}
+                {!selectedLoading && !attachmentFieldId && <div className="empty">请先选择附件字段</div>}
+                {!selectedLoading && attachmentFieldId && selectedRecordCount === 0 && (
+                  <div className="empty">请在表格中选中一行</div>
                 )}
-                <div className="thumb-name">{att.name}</div>
+                {!selectedLoading && attachmentFieldId && selectedRecordCount > 1 && (
+                  <div className="empty">已选 {selectedRecordCount} 行，请只选一行</div>
+                )}
+                {!selectedLoading &&
+                  attachmentFieldId &&
+                  selectedRecordCount === 1 &&
+                  selectedAttachments.length === 0 && <div className="empty">该行没有附件</div>}
+                {!selectedLoading &&
+                  attachmentFieldId &&
+                  selectedRecordCount === 1 &&
+                  selectedAttachments.length > 0 &&
+                  (() => {
+                    if (!activeAttachment) {
+                      return <div className="preview-placeholder">暂无预览</div>;
+                    }
+                    if (isVideoAttachment(activeAttachment) && activeAttachmentUrl) {
+                      return (
+                        <video className="preview-video" src={activeAttachmentUrl} controls>
+                          当前浏览器不支持视频预览
+                        </video>
+                      );
+                    }
+                    if (isImageAttachment(activeAttachment) && (activeAttachmentUrl || activeThumbnailUrl)) {
+                      const src = activeAttachmentUrl || activeThumbnailUrl;
+                      return <img className="preview-image" src={src} alt={activeAttachment.name} />;
+                    }
+                    return <div className="preview-placeholder">{getFileTag(activeAttachment.name)}</div>;
+                  })()}
               </div>
-            );
-          })}
-          {!selectedLoading && selectedAttachments.length === 0 && <div className="empty">暂无附件缩略图</div>}
-        </div>
+              <div className="preview-meta">
+                <div className="meta-title">当前文件</div>
+                <div className="file-name">{selectedRecordCount === 1 ? activeAttachment?.name || '—' : '—'}</div>
+                <div className="meta-row">已选记录：{selectedRecordCount}</div>
+                <div className="meta-row">附件数量：{selectedRecordCount === 1 ? selectedAttachments.length : 0}</div>
+                <div className="meta-row">
+                  {selectedRecordCount === 1 && selectedAttachments.length > 0
+                    ? reorderSaving
+                      ? '正在保存排序…'
+                      : '拖拽缩略图可调整顺序'
+                    : '请选择单行后查看预览'}
+                </div>
+              </div>
+            </div>
+            <div className="thumb-list">
+              {selectedRecordCount === 1 &&
+                selectedAttachments.map((att, index) => {
+                  const thumbUrl = selectedThumbnailUrls[index] || '';
+                  const isActive = index === selectedPreviewIndex;
+                  const isDragging = index === dragIndex;
+                  const isDragOver = index === dragOverIndex;
+                  return (
+                    <div
+                      className={`thumb-item${isActive ? ' active' : ''}${isDragging ? ' dragging' : ''}${isDragOver ? ' drag-over' : ''}`}
+                      key={`${att.token || att.name}-${index}`}
+                      draggable={!reorderSaving}
+                      onDragStart={() => handleDragStart(index)}
+                      onDragOver={(event) => handleDragOver(event, index)}
+                      onDrop={() => handleDrop(index)}
+                      onDragEnd={handleDragEnd}
+                      onClick={() => setSelectedPreviewIndex(index)}
+                      title={att.name}
+                    >
+                      {thumbUrl ? (
+                        <img className="thumb-image" src={thumbUrl} alt={att.name} />
+                      ) : (
+                        <div className="thumb-placeholder">{getFileTag(att.name)}</div>
+                      )}
+                      <div className="thumb-name">{att.name}</div>
+                    </div>
+                  );
+                })}
+              {!selectedLoading && selectedRecordCount !== 1 && <div className="empty">请先选中单行</div>}
+              {!selectedLoading && selectedRecordCount === 1 && selectedAttachments.length === 0 && (
+                <div className="empty">暂无附件缩略图</div>
+              )}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="card">
