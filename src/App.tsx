@@ -48,8 +48,7 @@ type RenameConfig = {
   replaceTemplate: string;
   appendPosition: AppendPosition;
   insertIndex: number;
-  appendFront: string;
-  appendBack: string;
+  appendTemplate: string;
   seqStart: number;
   seqPad: number;
 };
@@ -236,9 +235,7 @@ function renameAttachments(
       const rendered = renderTemplate(config.replaceTemplate, seq, fieldValues);
       newBase = rendered.trim() ? rendered : base;
     } else {
-      const front = renderTemplate(config.appendFront, seq, fieldValues);
-      const back = renderTemplate(config.appendBack, seq, fieldValues);
-      const insertText = `${front}${seq}${back}`;
+      const insertText = renderTemplate(config.appendTemplate, seq, fieldValues);
       if (config.appendPosition === 'prepend') {
         newBase = `${insertText}${base}`;
       } else if (config.appendPosition === 'append') {
@@ -308,16 +305,14 @@ export default function App() {
   const [replaceTemplate, setReplaceTemplate] = useState('');
   const [appendPosition, setAppendPosition] = useState<AppendPosition>('append');
   const [insertIndex, setInsertIndex] = useState(0);
-  const [appendFront, setAppendFront] = useState('');
-  const [appendBack, setAppendBack] = useState('');
+  const [appendTemplate, setAppendTemplate] = useState('');
   const [seqStart, setSeqStart] = useState(1);
   const [seqPad, setSeqPad] = useState(0);
-  const [activeInput, setActiveInput] = useState<'replace' | 'front' | 'back' | null>(null);
+  const [activeInput, setActiveInput] = useState<'replace' | 'append' | null>(null);
   const [cursorPosition, setCursorPosition] = useState<number | null>(null);
 
   const replaceInputRef = useRef<HTMLInputElement>(null);
-  const frontInputRef = useRef<HTMLInputElement>(null);
-  const backInputRef = useRef<HTMLInputElement>(null);
+  const appendInputRef = useRef<HTMLInputElement>(null);
 
   const [estimatedCount, setEstimatedCount] = useState<number | null>(null);
   const [previewItems, setPreviewItems] = useState<PreviewItem[]>([]);
@@ -358,12 +353,11 @@ export default function App() {
       replaceTemplate,
       appendPosition,
       insertIndex: safeInsert,
-      appendFront,
-      appendBack,
+      appendTemplate,
       seqStart: safeSeqStart,
       seqPad: safeSeqPad,
     };
-  }, [appendBack, appendFront, appendPosition, insertIndex, mode, replaceTemplate, seqPad, seqStart]);
+  }, [appendTemplate, appendPosition, insertIndex, mode, replaceTemplate, seqPad, seqStart]);
 
   const refreshFields = useCallback(async () => {
     if (!table) {
@@ -647,7 +641,7 @@ export default function App() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [attachmentFieldId, buildPreview, mode, table, scope, replaceTemplate, appendPosition, insertIndex, appendFront, appendBack, seqStart, seqPad]);
+  }, [attachmentFieldId, buildPreview, mode, table, scope, replaceTemplate, appendPosition, insertIndex, appendTemplate, seqStart, seqPad]);
 
   useEffect(() => {
     loadSelectedPreview();
@@ -662,8 +656,7 @@ export default function App() {
     // 获取当前输入框的引用和光标位置
     const getInputElement = () => {
       if (activeInput === 'replace') return replaceInputRef.current;
-      if (activeInput === 'front') return frontInputRef.current;
-      if (activeInput === 'back') return backInputRef.current;
+      if (activeInput === 'append') return appendInputRef.current;
       return null;
     };
 
@@ -681,13 +674,8 @@ export default function App() {
       setCursorPosition(pos + token.length);
       return;
     }
-    if (activeInput === 'front') {
-      setAppendFront(insertAtPosition);
-      setCursorPosition(pos + token.length);
-      return;
-    }
-    if (activeInput === 'back') {
-      setAppendBack(insertAtPosition);
+    if (activeInput === 'append') {
+      setAppendTemplate(insertAtPosition);
       setCursorPosition(pos + token.length);
     }
   }, [activeInput, cursorPosition]);
@@ -1219,30 +1207,18 @@ export default function App() {
             )}
 
             <div className="row">
-              <span className="label">前面字符</span>
+              <span className="label">追加内容</span>
               <Input
-                ref={frontInputRef}
-                value={appendFront}
-                onChange={(value) => setAppendFront(value)}
-                onFocus={() => { setActiveInput('front'); setCursorPosition(appendFront.length); }}
-                onSelect={(e) => setCursorPosition((e.target as HTMLInputElement).selectionStart ?? appendFront.length)}
-                placeholder="可插入 {{字段名}}"
+                ref={appendInputRef}
+                value={appendTemplate}
+                onChange={(value) => setAppendTemplate(value)}
+                onFocus={() => { setActiveInput('append'); setCursorPosition(appendTemplate.length); }}
+                onSelect={(e) => setCursorPosition((e.target as HTMLInputElement).selectionStart ?? appendTemplate.length)}
+                placeholder="可输入固定文本，并支持 {{序号}} {{字段名}}"
                 disabled={processing}
               />
             </div>
-            <div className="row">
-              <span className="label">后面字符</span>
-              <Input
-                ref={backInputRef}
-                value={appendBack}
-                onChange={(value) => setAppendBack(value)}
-                onFocus={() => { setActiveInput('back'); setCursorPosition(appendBack.length); }}
-                onSelect={(e) => setCursorPosition((e.target as HTMLInputElement).selectionStart ?? appendBack.length)}
-                placeholder="可插入 {{字段名}}"
-                disabled={processing}
-              />
-            </div>
-            <div className="hint">追加规则：前面字符 + 序号 + 后面字符</div>
+            <div className="hint">追加内容将插入到指定位置</div>
           </TabPane>
         </Tabs>
       </section>
