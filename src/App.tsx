@@ -26,7 +26,6 @@ import { DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 're
 const PREVIEW_LIMIT = 50;
 const BATCH_SIZE = 50;
 const TOKEN_SEQ = '{{序号}}';
-const TOKEN_FIELD = '{{字段值}}';
 
 type Scope = 'selected' | 'view' | 'all';
 type Mode = 'replace' | 'append';
@@ -71,8 +70,21 @@ function formatSequence(num: number, pad: number): string {
   return raw.padStart(pad, '0');
 }
 
-function renderTemplate(input: string, seqText: string, fieldValue: string): string {
-  return input.split(TOKEN_SEQ).join(seqText).split(TOKEN_FIELD).join(fieldValue);
+function renderTemplate(
+  input: string,
+  seqText: string,
+  fieldValues: Record<string, string>
+): string {
+  let result = input.split(TOKEN_SEQ).join(seqText);
+  // 匹配 {{字段名}} 格式的变量，支持任意字段名
+  result = result.replace(/\{\{([^{}]+)\}\}/g, (match, fieldName) => {
+    const trimmedName = fieldName.trim();
+    if (trimmedName === '序号') {
+      return seqText;
+    }
+    return fieldValues[trimmedName] ?? '';
+  });
+  return result;
 }
 
 function ensureUniqueName(base: string, ext: string, used: Set<string>): string {
@@ -107,7 +119,10 @@ function formatCellValue(value: unknown): string {
   if (value === null || value === undefined) {
     return '';
   }
-  if (typeof value === 'string' || typeof value === 'number') {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number') {
     return String(value);
   }
   if (typeof value === 'boolean') {
@@ -124,39 +139,56 @@ function formatCellValue(value: unknown): string {
         }
         if (typeof item === 'object') {
           const obj = item as Record<string, unknown>;
+          // 人员、群组、关联记录等
           if (typeof obj.name === 'string') {
             return obj.name;
           }
+          // 富文本
           if (typeof obj.text === 'string') {
             return obj.text;
           }
+          // 选项字段
+          if (typeof obj.id === 'string' && typeof obj.text === 'string') {
+            return obj.text;
+          }
         }
-        try {
-          return JSON.stringify(item);
-        } catch {
-          return String(item);
-        }
+        return '';
       })
       .filter(Boolean)
       .join(',');
   }
   if (typeof value === 'object') {
     const obj = value as Record<string, unknown>;
+    // 进度字段: {status: "completed", value: 14}
+    if ('value' in obj && (typeof obj.value === 'number' || typeof obj.value === 'string')) {
+      return String(obj.value);
+    }
+    // 人员、关联记录等
     if (typeof obj.name === 'string') {
       return obj.name;
     }
+    // 富文本
     if (typeof obj.text === 'string') {
       return obj.text;
     }
+    // 标题字段
     if (typeof obj.title === 'string') {
       return obj.title;
     }
+    // 链接字段: {link: "url", text: "显示文本"}
+    if (typeof obj.link === 'string') {
+      return typeof obj.text === 'string' && obj.text ? obj.text : obj.link;
+    }
+    // 地理位置: {location: "地址", name: "地点名"} 或 {address: "地址"}
+    if (typeof obj.location === 'string') {
+      return obj.location;
+    }
+    if (typeof obj.address === 'string') {
+      return obj.address;
+    }
   }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+  // 其他未知类型，返回空字符串而不是 JSON
+  return '';
 }
 
 function getErrorMessage(error: unknown): string {
@@ -192,7 +224,7 @@ function getDiffParts(oldName: string, newName: string): { prefix: string; diff:
 function renameAttachments(
   attachments: IOpenAttachment[],
   config: RenameConfig,
-  fieldValue: string
+  fieldValues: Record<string, string>
 ): { updated: IOpenAttachment[]; changed: boolean } {
   const used = new Set<string>();
   const updated = attachments.map((att, index) => {
@@ -201,11 +233,11 @@ function renameAttachments(
     let newBase = base;
 
     if (config.mode === 'replace') {
-      const rendered = renderTemplate(config.replaceTemplate, seq, fieldValue);
+      const rendered = renderTemplate(config.replaceTemplate, seq, fieldValues);
       newBase = rendered.trim() ? rendered : base;
     } else {
-      const front = renderTemplate(config.appendFront, seq, fieldValue);
-      const back = renderTemplate(config.appendBack, seq, fieldValue);
+      const front = renderTemplate(config.appendFront, seq, fieldValues);
+      const back = renderTemplate(config.appendBack, seq, fieldValues);
       const insertText = `${front}${seq}${back}`;
       if (config.appendPosition === 'prepend') {
         newBase = `${insertText}${base}`;
@@ -267,10 +299,11 @@ export default function App() {
   const [table, setTable] = useState<ITable | null>(null);
   const [fieldOptions, setFieldOptions] = useState<{ label: string; value: string }[]>([]);
   const [variableOptions, setVariableOptions] = useState<{ label: string; value: string }[]>([]);
+  const [fieldIdToName, setFieldIdToName] = useState<Record<string, string>>({});
   const [attachmentFieldId, setAttachmentFieldId] = useState('');
-  const [fieldValueFieldId, setFieldValueFieldId] = useState('');
 
   const [scope, setScope] = useState<Scope>('view');
+  const [manualSelectedRecordIds, setManualSelectedRecordIds] = useState<string[]>([]);
   const [mode, setMode] = useState<Mode>('replace');
   const [replaceTemplate, setReplaceTemplate] = useState('');
   const [appendPosition, setAppendPosition] = useState<AppendPosition>('append');
@@ -280,6 +313,11 @@ export default function App() {
   const [seqStart, setSeqStart] = useState(1);
   const [seqPad, setSeqPad] = useState(0);
   const [activeInput, setActiveInput] = useState<'replace' | 'front' | 'back' | null>(null);
+  const [cursorPosition, setCursorPosition] = useState<number | null>(null);
+
+  const replaceInputRef = useRef<HTMLInputElement>(null);
+  const frontInputRef = useRef<HTMLInputElement>(null);
+  const backInputRef = useRef<HTMLInputElement>(null);
 
   const [estimatedCount, setEstimatedCount] = useState<number | null>(null);
   const [previewItems, setPreviewItems] = useState<PreviewItem[]>([]);
@@ -337,24 +375,25 @@ export default function App() {
       const variables = fields.filter((field) => field.type !== FieldType.Attachment);
 
       setFieldOptions(attachments.map((field) => ({ label: field.name, value: field.id })));
-      setVariableOptions([
-        { label: '不使用字段值', value: '' },
-        ...variables.map((field) => ({ label: field.name, value: field.id })),
-      ]);
+      setVariableOptions(
+        variables.map((field) => ({ label: field.name, value: field.id }))
+      );
+
+      // 建立字段 ID 到字段名的映射
+      const idToName: Record<string, string> = {};
+      for (const field of variables) {
+        idToName[field.id] = field.name;
+      }
+      setFieldIdToName(idToName);
 
       const attachmentIds = new Set(attachments.map((field) => field.id));
       if (attachmentFieldId && !attachmentIds.has(attachmentFieldId)) {
         setAttachmentFieldId('');
       }
-
-      const variableIds = new Set(variables.map((field) => field.id));
-      if (fieldValueFieldId && !variableIds.has(fieldValueFieldId)) {
-        setFieldValueFieldId('');
-      }
     } catch (error) {
       Toast.error(`字段加载失败：${getErrorMessage(error)}`);
     }
-  }, [attachmentFieldId, fieldValueFieldId, table]);
+  }, [attachmentFieldId, table]);
 
   useEffect(() => {
     let mounted = true;
@@ -402,11 +441,14 @@ export default function App() {
       const ids = await view.getVisibleRecordIdList();
       return ids.filter((id): id is string => Boolean(id));
     }
+    // 使用 getSelection 获取选中的记录
     const selection = await bitable.base.getSelection();
+    // 优先尝试获取多选记录
     const recordIds = (selection as { recordIds?: string[] })?.recordIds;
-    if (Array.isArray(recordIds)) {
+    if (Array.isArray(recordIds) && recordIds.length > 0) {
       return recordIds.filter((id): id is string => Boolean(id));
     }
+    // 兜底：获取单条选中记录
     const recordId = (selection as { recordId?: string })?.recordId;
     return recordId ? [recordId] : [];
   }, [table]);
@@ -428,7 +470,10 @@ export default function App() {
     if (!table) {
       return;
     }
-    updateEstimatedCount(scope);
+    // 已选记录的数量由 handleScopeChange 设置，不需要这里更新
+    if (scope !== 'selected') {
+      updateEstimatedCount(scope);
+    }
   }, [scope, table, updateEstimatedCount]);
 
   const buildPreview = useCallback(async () => {
@@ -452,9 +497,13 @@ export default function App() {
         if (attachments.length === 0) {
           continue;
         }
-        const fieldValueRaw = fieldValueFieldId ? record.fields?.[fieldValueFieldId] : undefined;
-        const fieldValue = formatCellValue(fieldValueRaw);
-        const { updated } = renameAttachments(attachments, normalizedConfig, fieldValue);
+        // 构建所有字段的值映射
+        const fieldValues: Record<string, string> = {};
+        for (const [fieldId, fieldName] of Object.entries(fieldIdToName)) {
+          const rawValue = record.fields?.[fieldId];
+          fieldValues[fieldName] = formatCellValue(rawValue);
+        }
+        const { updated } = renameAttachments(attachments, normalizedConfig, fieldValues);
         updated.forEach((att, index) => {
           items.push({
             id: `${recordId}-${index}`,
@@ -477,7 +526,7 @@ export default function App() {
         setPreviewLoading(false);
       }
     }
-  }, [attachmentFieldId, fieldValueFieldId, getRecordIdsByScope, normalizedConfig, scope, table]);
+  }, [attachmentFieldId, fieldIdToName, getRecordIdsByScope, normalizedConfig, scope, table]);
 
   const loadSelectedPreview = useCallback(async () => {
     if (!table || !attachmentFieldId) {
@@ -598,7 +647,7 @@ export default function App() {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [attachmentFieldId, buildPreview, fieldValueFieldId, mode, table, scope, replaceTemplate, appendPosition, insertIndex, appendFront, appendBack, seqStart, seqPad]);
+  }, [attachmentFieldId, buildPreview, mode, table, scope, replaceTemplate, appendPosition, insertIndex, appendFront, appendBack, seqStart, seqPad]);
 
   useEffect(() => {
     loadSelectedPreview();
@@ -609,18 +658,39 @@ export default function App() {
       Toast.info('先点击一个输入框，再插入变量');
       return;
     }
+
+    // 获取当前输入框的引用和光标位置
+    const getInputElement = () => {
+      if (activeInput === 'replace') return replaceInputRef.current;
+      if (activeInput === 'front') return frontInputRef.current;
+      if (activeInput === 'back') return backInputRef.current;
+      return null;
+    };
+
+    const inputEl = getInputElement();
+    const pos = cursorPosition ?? (inputEl?.value?.length ?? 0);
+
+    const insertAtPosition = (prev: string) => {
+      const before = prev.slice(0, pos);
+      const after = prev.slice(pos);
+      return `${before}${token}${after}`;
+    };
+
     if (activeInput === 'replace') {
-      setReplaceTemplate((prev) => `${prev}${token}`);
+      setReplaceTemplate(insertAtPosition);
+      setCursorPosition(pos + token.length);
       return;
     }
     if (activeInput === 'front') {
-      setAppendFront((prev) => `${prev}${token}`);
+      setAppendFront(insertAtPosition);
+      setCursorPosition(pos + token.length);
       return;
     }
     if (activeInput === 'back') {
-      setAppendBack((prev) => `${prev}${token}`);
+      setAppendBack(insertAtPosition);
+      setCursorPosition(pos + token.length);
     }
-  }, [activeInput]);
+  }, [activeInput, cursorPosition]);
 
   const handleDragStart = useCallback((index: number) => {
     setDragIndex(index);
@@ -749,9 +819,13 @@ export default function App() {
             if (attachments.length === 0) {
               return null;
             }
-            const fieldValueRaw = fieldValueFieldId ? record.fields?.[fieldValueFieldId] : undefined;
-            const fieldValue = formatCellValue(fieldValueRaw);
-            const { updated, changed } = renameAttachments(attachments, normalizedConfig, fieldValue);
+            // 构建所有字段的值映射
+            const fieldValues: Record<string, string> = {};
+            for (const [fieldId, fieldName] of Object.entries(fieldIdToName)) {
+              const rawValue = record.fields?.[fieldId];
+              fieldValues[fieldName] = formatCellValue(rawValue);
+            }
+            const { updated, changed } = renameAttachments(attachments, normalizedConfig, fieldValues);
             if (!changed) {
               return null;
             }
@@ -793,7 +867,7 @@ export default function App() {
       loadSelectedPreview();
       buildPreview();
     }
-  }, [attachmentFieldId, buildPreview, fieldValueFieldId, loadSelectedPreview, normalizedConfig, pushUndoSnapshot, table]);
+  }, [attachmentFieldId, buildPreview, fieldIdToName, loadSelectedPreview, normalizedConfig, pushUndoSnapshot, table]);
 
   const handleStart = useCallback(async () => {
     if (!table) {
@@ -809,10 +883,21 @@ export default function App() {
       return;
     }
 
-    const recordIds = await getRecordIdsByScope(scope);
-    if (recordIds.length === 0) {
-      Toast.info('当前范围没有记录');
-      return;
+    let recordIds: string[] = [];
+
+    if (scope === 'selected') {
+      // 使用已选择的记录ID
+      if (manualSelectedRecordIds.length === 0) {
+        Toast.info('请先选择记录');
+        return;
+      }
+      recordIds = manualSelectedRecordIds;
+    } else {
+      recordIds = await getRecordIdsByScope(scope);
+      if (recordIds.length === 0) {
+        Toast.info('当前范围没有记录');
+        return;
+      }
     }
 
     Modal.confirm({
@@ -823,6 +908,35 @@ export default function App() {
       },
     });
   }, [attachmentFieldId, executeRename, getRecordIdsByScope, mode, replaceTemplate, scope, table]);
+
+  // 处理范围切换，选择"已选记录"时弹出选择对话框
+  const handleScopeChange = useCallback(async (newScope: Scope) => {
+    if (newScope === 'selected') {
+      try {
+        const selection = await bitable.base.getSelection();
+        const tableId = selection?.tableId;
+        const viewId = selection?.viewId;
+        if (!tableId || !viewId) {
+          Toast.error('无法获取当前表格信息');
+          return;
+        }
+        const recordIds = await bitable.ui.selectRecordIdList(tableId, viewId);
+        if (!recordIds || recordIds.length === 0) {
+          Toast.info('未选择任何记录');
+          return;
+        }
+        setManualSelectedRecordIds(recordIds);
+        setScope('selected');
+        setEstimatedCount(recordIds.length);
+      } catch (error) {
+        // 用户取消选择，不切换范围
+      }
+    } else {
+      setManualSelectedRecordIds([]);
+      setScope(newScope);
+      updateEstimatedCount(newScope);
+    }
+  }, [updateEstimatedCount]);
 
   const handleUndo = useCallback(() => {
     if (!table || undoStack.length === 0) {
@@ -1007,44 +1121,35 @@ export default function App() {
 
       <section className="card">
         <div className="section-title">2. 选择作用范围</div>
-        <Radio.Group value={scope} onChange={(e) => setScope(e.target.value as Scope)} disabled={processing}>
+        <Radio.Group value={scope} onChange={(e) => handleScopeChange(e.target.value as Scope)} disabled={processing}>
           <Radio value="selected">已选记录</Radio>
           <Radio value="view">当前视图</Radio>
           <Radio value="all">全表</Radio>
         </Radio.Group>
         <div className="hint">
           预计处理记录数：{estimatedCount === null ? '—' : estimatedCount}
-          {scope === 'selected' ? '（请先在表格中选中记录）' : ''}
+          {scope === 'selected' && manualSelectedRecordIds.length > 0 ? `（已选择 ${manualSelectedRecordIds.length} 条）` : ''}
         </div>
       </section>
 
       <section className="card">
         <div className="section-title">3. 变量设置</div>
-        <div className="row">
-          <span className="label">字段值来源</span>
-          <Select
-            className="field-select"
-            placeholder="可选（用于 {{字段值}}）"
-            value={fieldValueFieldId || ''}
-            onChange={(value) => setFieldValueFieldId(String(value || ''))}
-            optionList={variableOptions}
-            filter
-            disabled={processing}
-          />
-        </div>
         <div className="token-bar">
           <span className="token-label">可插入变量：</span>
           <Button size="small" onClick={() => handleInsertToken(TOKEN_SEQ)} disabled={processing}>
             序号
           </Button>
-          <Button
-            size="small"
-            onClick={() => handleInsertToken(TOKEN_FIELD)}
-            disabled={!fieldValueFieldId || processing}
-          >
-            字段值
-          </Button>
-          <span className="token-hint">先点击输入框，再点击按钮</span>
+          {variableOptions.map((opt) => (
+            <Button
+              key={opt.value}
+              size="small"
+              onClick={() => handleInsertToken(`{{${opt.label}}}`)}
+              disabled={processing}
+            >
+              {opt.label}
+            </Button>
+          ))}
+          <span className="token-hint">先点击输入框，再点击按钮插入变量</span>
         </div>
         <div className="row">
           <span className="label">自动序号</span>
@@ -1065,7 +1170,7 @@ export default function App() {
             />
           </Space>
         </div>
-        <div className="hint">每条记录内序号从起始值重新计数</div>
+        <div className="hint">每条记录内序号从起始值重新计数；变量格式为 {"{{"}字段名{"}}"}</div>
       </section>
 
       <section className="card">
@@ -1075,10 +1180,12 @@ export default function App() {
             <div className="row">
               <span className="label">新名称模板</span>
               <Input
+                ref={replaceInputRef}
                 value={replaceTemplate}
                 onChange={(value) => setReplaceTemplate(value)}
-                onFocus={() => setActiveInput('replace')}
-                placeholder={`可输入固定文本，并支持 ${TOKEN_SEQ} ${TOKEN_FIELD}`}
+                onFocus={() => { setActiveInput('replace'); setCursorPosition(replaceTemplate.length); }}
+                onSelect={(e) => setCursorPosition((e.target as HTMLInputElement).selectionStart ?? replaceTemplate.length)}
+                placeholder="可输入固定文本，并支持 {{序号}} {{字段名}}"
                 disabled={processing}
               />
             </div>
@@ -1114,20 +1221,24 @@ export default function App() {
             <div className="row">
               <span className="label">前面字符</span>
               <Input
+                ref={frontInputRef}
                 value={appendFront}
                 onChange={(value) => setAppendFront(value)}
-                onFocus={() => setActiveInput('front')}
-                placeholder={`可插入 ${TOKEN_FIELD}`}
+                onFocus={() => { setActiveInput('front'); setCursorPosition(appendFront.length); }}
+                onSelect={(e) => setCursorPosition((e.target as HTMLInputElement).selectionStart ?? appendFront.length)}
+                placeholder="可插入 {{字段名}}"
                 disabled={processing}
               />
             </div>
             <div className="row">
               <span className="label">后面字符</span>
               <Input
+                ref={backInputRef}
                 value={appendBack}
                 onChange={(value) => setAppendBack(value)}
-                onFocus={() => setActiveInput('back')}
-                placeholder={`可插入 ${TOKEN_FIELD}`}
+                onFocus={() => { setActiveInput('back'); setCursorPosition(appendBack.length); }}
+                onSelect={(e) => setCursorPosition((e.target as HTMLInputElement).selectionStart ?? appendBack.length)}
+                placeholder="可插入 {{字段名}}"
                 disabled={processing}
               />
             </div>
